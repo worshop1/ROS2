@@ -172,10 +172,30 @@ setup(
 ### 5. package.xml에 의존성 추가
 
 ```xml
-<exec_depend>rclpy</exec_depend>
-<exec_depend>sensor_msgs</exec_depend>
-<exec_depend>cv_bridge</exec_depend>
-<exec_depend>std_msgs</exec_depend>
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>camera_pubsub</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="jarabot@todo.todo">jarabot</maintainer>
+  <license>TODO: License declaration</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
+
 ```
 
 ### 6. 빌드 및 실행
