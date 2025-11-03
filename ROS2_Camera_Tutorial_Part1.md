@@ -1,0 +1,175 @@
+# ROS2 카메라 Pub/Sub 패키지 개발 튜토리얼 - Part 1
+
+## 📚 개요
+
+### 학습 목표
+- ROS2 Humble에서 Python과 C++로 카메라 영상을 발행(Publish)하고 구독(Subscribe)하는 노드 개발
+- OpenCV를 활용한 카메라 영상 처리
+- `cv_bridge`를 사용한 ROS2 Image 메시지와 OpenCV 이미지 간 변환
+
+### 개발 환경
+- **OS:** Ubuntu 22.04
+- **ROS2 버전:** Humble
+- **카메라:** 노트북 내장 카메라 (USB 카메라)
+- **해상도:** 1280x720
+- **프레임률:** 15 FPS
+- **토픽:** `/camera/image_raw`
+- **메시지 타입:** `sensor_msgs/msg/Image`
+
+---
+
+## Python ROS2 패키지 개발
+
+### 1. 패키지 생성
+
+```bash
+cd ~/ros2_ws/src
+ros2 pkg create --build-type ament_python camera_pubsub \
+  --dependencies rclpy sensor_msgs cv_bridge std_msgs
+```
+
+### 2. Camera Publisher 구현
+
+파일: `camera_pubsub/camera_publisher.py`
+
+```python
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
+
+class CameraPublisher(Node):
+    def __init__(self):
+        super().__init__('camera_publisher')
+        self.publisher_ = self.create_publisher(Image, '/camera/image_raw', 10)
+        self.cap = cv2.VideoCapture(0)
+        
+        if not self.cap.isOpened():
+            self.get_logger().error('카메라를 열 수 없습니다!')
+            raise RuntimeError('카메라 초기화 실패')
+        
+        # 카메라 설정
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_FPS, 15)
+        
+        timer_period = 1.0 / 15.0
+        self.timer = self.create_timer(timer_period, self.timer_callback)
+        self.bridge = CvBridge()
+        
+        self.get_logger().info('Camera Publisher 시작 - 1280x720 @ 15 FPS')
+    
+    def timer_callback(self):
+        ret, frame = self.cap.read()
+        if ret:
+            msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+            self.publisher_.publish(msg)
+    
+    def destroy_node(self):
+        self.cap.release()
+        super().destroy_node()
+
+def main(args=None):
+    rclpy.init(args=args)
+    camera_publisher = CameraPublisher()
+    try:
+        rclpy.spin(camera_publisher)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        camera_publisher.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+```
+
+### 3. Camera Subscriber 구현
+
+파일: `camera_pubsub/camera_subscriber.py`
+
+```python
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
+
+class CameraSubscriber(Node):
+    def __init__(self):
+        super().__init__('camera_subscriber')
+        self.subscription = self.create_subscription(
+            Image, '/camera/image_raw', self.listener_callback, 10)
+        self.bridge = CvBridge()
+        self.window_name = 'Camera Feed'
+        self.get_logger().info('Camera Subscriber 시작 - "q" 키로 종료')
+    
+    def listener_callback(self, msg):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            cv2.imshow(self.window_name, cv_image)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                rclpy.shutdown()
+        except Exception as e:
+            self.get_logger().error(f'오류: {str(e)}')
+    
+    def destroy_node(self):
+        cv2.destroyAllWindows()
+        super().destroy_node()
+
+def main(args=None):
+    rclpy.init(args=args)
+    camera_subscriber = CameraSubscriber()
+    try:
+        rclpy.spin(camera_subscriber)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        camera_subscriber.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+```
+
+### 4. setup.py 수정
+
+```python
+entry_points={
+    'console_scripts': [
+        'camera_publisher = camera_pubsub.camera_publisher:main',
+        'camera_subscriber = camera_pubsub.camera_subscriber:main',
+    ],
+},
+```
+
+### 5. package.xml에 의존성 추가
+
+```xml
+<exec_depend>rclpy</exec_depend>
+<exec_depend>sensor_msgs</exec_depend>
+<exec_depend>cv_bridge</exec_depend>
+<exec_depend>std_msgs</exec_depend>
+```
+
+### 6. 빌드 및 실행
+
+```bash
+cd ~/ros2_ws
+colcon build --packages-select camera_pubsub
+source install/setup.bash
+
+# 터미널 1
+ros2 run camera_pubsub camera_publisher
+
+# 터미널 2
+ros2 run camera_pubsub camera_subscriber
+```
+
+---
+
+## 다음: Part 2에서 C++ 구현을 다룹니다
