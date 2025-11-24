@@ -1,0 +1,677 @@
+ROS2 카메라 스냅샷 서비스 구현 가이드
+
+ 
+
+1단계: 워크스페이스 준비
+
+ 
+
+bash
+
+# 워크스페이스 생성 (이미 있다면 스킵)
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
+
+ 
+
+2단계: 패키지 생성
+
+ 
+
+서비스 정의 패키지 생성 (메시지 타입)
+
+ 
+
+bash
+
+cd ~/ros2_ws/src
+ros2 pkg create --build-type ament_cmake camera_interfaces
+
+ 
+
+Request 패키지 생성 (Service Client)
+
+ 
+
+bash
+
+ros2 pkg create --build-type ament_cmake opencv_webcam_request \
+  --dependencies rclcpp std_srvs sensor_msgs
+
+ 
+
+Response 패키지 생성 (Service Server)
+
+ 
+
+bash
+
+ros2 pkg create --build-type ament_cmake opencv_webcam_response \
+  --dependencies rclcpp std_srvs sensor_msgs cv_bridge OpenCV
+
+ 
+
+3단계: 커스텀 서비스 메시지 정의 (camera_interfaces)
+
+ 
+
+camera_interfaces란?
+
+ 
+
+camera_interfaces는 커스텀 ROS2 메시지를 정의하는 패키지입니다.
+
+ 
+
+왜 필요한가?
+
+ 
+
+ROS2에는 기본 서비스 타입들(std_srvs/SetBool, std_srvs/Trigger 등)이 있지만, 우리가 원하는 파일명을 받고, 저장 경로를 반환하는 기능은 없습니다
+
+따라서 우리만의 커스텀 서비스 타입을 만들어야 합니다
+
+ 
+
+작동 원리
+
+ 
+
+.srv 파일에 메시지 구조 정의
+
+빌드 시 자동으로 C++ 헤더 파일 생성
+
+다른 패키지에서 #include로 사용
+
+ 
+
+camera_interfaces 패키지 구조
+
+ 
+
+camera_interfaces/
+├── CMakeLists.txt          
+
+### camera_interfaces/package.xml 수정
+```xml
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>camera_interfaces</name>
+  <version>0.0.1</version>
+  <description>Custom camera service interfaces</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+```
+
+### camera_interfaces/CMakeLists.txt 수정
+```cmake
+cmake_minimum_required(VERSION 3.8)
+project(camera_interfaces)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+# 서비스 파일 선언
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/CaptureSnapshot.srv"
+)
+
+ament_package()
+```
+
+## 4단계: Service Server 구현 (opencv_webcam_response)
+
+### opencv_webcam_response 패키지 구조
+
+1단계: 현재 상태 확인
+
+ 
+
+bash
+
+cd ~/ros2_ws/src/camera_interfaces
+ls -la
+ls -la srv/
+
+ 
+
+2단계: srv 디렉토리와 파일 생성
+
+ 
+
+bash
+
+# camera_interfaces 패키지로 이동
+cd ~/ros2_ws/src/camera_interfaces
+
+# srv 디렉토리 생성 (이미 있어도 에러 안남)
+mkdir -p srv
+
+# CaptureSnapshot.srv 파일 생성
+cat > srv/CaptureSnapshot.srv << 'EOF'
+# Request
+string filename
+---
+# Response
+bool success
+string message
+string filepath
+EOF
+
+ 
+
+3단계: 파일 확인
+
+ 
+
+bash
+
+# 파일이 제대로 생성되었는지 확인
+cat srv/CaptureSnapshot.srv
+```
+
+**출력이 다음과 같아야 합니다:**
+```
+# Request
+string filename
+---
+# Response
+bool success
+string message
+string filepath
+
+
+
+ 
+
+opencv_webcam_response/ ├── CMakeLists.txt ├── package.xml └── src/ └── camera_server.cpp
+
+ 
+
+
+### src/camera_server.cpp
+```cpp
+#include <opencv2/opencv.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
+#include <camera_interfaces/srv/capture_snapshot.hpp>
+#include <cv_bridge/cv_bridge.h>
+
+using namespace cv;
+using namespace std::chrono_literals;
+
+class CameraServerNode : public rclcpp::Node
+{
+private:
+    VideoCapture cap_;
+    rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr publisher_;
+    rclcpp::Service<camera_interfaces::srv::CaptureSnapshot>::SharedPtr snapshot_service_;
+    rclcpp::TimerBase::SharedPtr timer_;
+    
+    int quality_ = 80;
+    std::string save_directory_ = "./snapshots/";
+
+public:
+    CameraServerNode() : Node("camera_server_node")
+    {
+        // 저장 디렉토리 생성
+        system(("mkdir -p " + save_directory_).c_str());
+        
+        // 퍼블리셔 생성
+        publisher_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(
+            "/image_raw/compressed", 10);
+        
+        // 스냅샷 서비스 생성
+        snapshot_service_ = this->create_service<camera_interfaces::srv::CaptureSnapshot>(
+            "capture_snapshot",
+            std::bind(&CameraServerNode::handleSnapshotService, this,
+                     std::placeholders::_1, std::placeholders::_2));
+        
+        // 카메라 초기화
+        if (!initCamera())
+        {
+            RCLCPP_ERROR(this->get_logger(), "Failed to initialize camera");
+            rclcpp::shutdown();
+            return;
+        }
+        
+        // 타이머로 영상 퍼블리시
+        timer_ = this->create_wall_timer(
+            33ms, std::bind(&CameraServerNode::publishImage, this));
+        
+        RCLCPP_INFO(this->get_logger(), "Camera server node started");
+        RCLCPP_INFO(this->get_logger(), "Snapshot service available at: /capture_snapshot");
+        RCLCPP_INFO(this->get_logger(), "Save directory: %s", save_directory_.c_str());
+    }
+    
+    ~CameraServerNode()
+    {
+        if (cap_.isOpened())
+            cap_.release();
+    }
+
+private:
+    bool initCamera()
+    {
+        cap_.open(0, cv::CAP_V4L2);
+        if (!cap_.isOpened())
+            return false;
+        
+        cap_.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+        cap_.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+        cap_.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+        cap_.set(cv::CAP_PROP_FPS, 15);
+        
+        return true;
+    }
+    
+    void publishImage()
+    {
+        Mat frame;
+        cap_ >> frame;
+        
+        if (frame.empty())
+            return;
+        
+        // JPEG 압축
+        std::vector<uchar> buf;
+        std::vector<int> params = {IMWRITE_JPEG_QUALITY, quality_};
+        imencode(".jpg", frame, buf, params);
+        
+        // ROS2 메시지 생성 및 발행
+        auto msg = std::make_shared<sensor_msgs::msg::CompressedImage>();
+        msg->format = "jpeg";
+        msg->data = std::move(buf);
+        msg->header.stamp = this->now();
+        msg->header.frame_id = "camera_frame";
+        
+        publisher_->publish(*msg);
+    }
+    
+    // 스냅샷 서비스 콜백
+    void handleSnapshotService(
+        const std::shared_ptr<camera_interfaces::srv::CaptureSnapshot::Request> request,
+        std::shared_ptr<camera_interfaces::srv::CaptureSnapshot::Response> response)
+    {
+        Mat frame;
+        cap_ >> frame;
+        
+        if (frame.empty())
+        {
+            response->success = false;
+            response->message = "Failed to capture frame from camera";
+            response->filepath = "";
+            RCLCPP_ERROR(this->get_logger(), "Failed to capture frame");
+            return;
+        }
+        
+        // 파일명 생성
+        std::string filename = request->filename;
+        if (filename.empty())
+        {
+            // 기본 파일명: snapshot_timestamp.jpg
+            auto now = std::chrono::system_clock::now();
+            auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+                now.time_since_epoch()).count();
+            filename = "snapshot_" + std::to_string(timestamp) + ".jpg";
+        }
+        else if (filename.find(".jpg") == std::string::npos && 
+                 filename.find(".png") == std::string::npos)
+        {
+            filename += ".jpg";
+        }
+        
+        std::string filepath = save_directory_ + filename;
+        
+        // 이미지 저장
+        if (imwrite(filepath, frame))
+        {
+            response->success = true;
+            response->message = "Snapshot saved successfully";
+            response->filepath = filepath;
+            RCLCPP_INFO(this->get_logger(), "Snapshot saved: %s", filepath.c_str());
+        }
+        else
+        {
+            response->success = false;
+            response->message = "Failed to save snapshot";
+            response->filepath = "";
+            RCLCPP_ERROR(this->get_logger(), "Failed to save snapshot");
+        }
+    }
+};
+
+int main(int argc, char** argv)
+{
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<CameraServerNode>();
+    rclcpp::spin(node);
+    rclcpp::shutdown();
+    return 0;
+}
+```
+
+### opencv_webcam_response/package.xml
+```xml
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>opencv_webcam_response</name>
+  <version>0.0.1</version>
+  <description>Camera snapshot service server</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_srvs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>OpenCV</depend>
+  <depend>camera_interfaces</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+```
+
+### opencv_webcam_response/CMakeLists.txt
+```cmake
+cmake_minimum_required(VERSION 3.8)
+project(opencv_webcam_response)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(OpenCV REQUIRED)
+find_package(camera_interfaces REQUIRED)
+
+# camera_server 실행파일
+add_executable(camera_server src/camera_server.cpp)
+ament_target_dependencies(camera_server 
+  rclcpp 
+  std_srvs 
+  sensor_msgs 
+  cv_bridge 
+  OpenCV
+  camera_interfaces
+)
+
+# 설치
+install(TARGETS
+  camera_server
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_package()
+```
+
+## 5단계: Service Client 구현 (opencv_webcam_request)
+
+### opencv_webcam_request 패키지 구조
+
+ 
+
+opencv_webcam_request/ ├── CMakeLists.txt ├── package.xml └── src/ └── snapshot_client.cpp
+
+ 
+
+
+### src/snapshot_client.cpp
+```cpp
+#include <rclcpp/rclcpp.hpp>
+#include <camera_interfaces/srv/capture_snapshot.hpp>
+#include <chrono>
+
+using namespace std::chrono_literals;
+
+class SnapshotClientNode : public rclcpp::Node
+{
+private:
+    rclcpp::Client<camera_interfaces::srv::CaptureSnapshot>::SharedPtr client_;
+
+public:
+    SnapshotClientNode() : Node("snapshot_client_node")
+    {
+        client_ = this->create_client<camera_interfaces::srv::CaptureSnapshot>(
+            "capture_snapshot");
+        
+        RCLCPP_INFO(this->get_logger(), "Snapshot client node started");
+    }
+    
+    void sendRequest(const std::string& filename = "")
+    {
+        // 서비스 서버 대기
+        while (!client_->wait_for_service(1s))
+        {
+            if (!rclcpp::ok())
+            {
+                RCLCPP_ERROR(this->get_logger(), 
+                    "Interrupted while waiting for service");
+                return;
+            }
+            RCLCPP_INFO(this->get_logger(), 
+                "Waiting for snapshot service...");
+        }
+        
+        // 요청 생성
+        auto request = std::make_shared<camera_interfaces::srv::CaptureSnapshot::Request>();
+        request->filename = filename;
+        
+        RCLCPP_INFO(this->get_logger(), "Sending snapshot request...");
+        
+        // 비동기 요청
+        auto result_future = client_->async_send_request(request);
+        
+        // 응답 대기
+        if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), 
+            result_future) == rclcpp::FutureReturnCode::SUCCESS)
+        {
+            auto result = result_future.get();
+            
+            if (result->success)
+            {
+                RCLCPP_INFO(this->get_logger(), "✓ Success!");
+                RCLCPP_INFO(this->get_logger(), "  Message: %s", 
+                    result->message.c_str());
+                RCLCPP_INFO(this->get_logger(), "  Filepath: %s", 
+                    result->filepath.c_str());
+            }
+            else
+            {
+                RCLCPP_ERROR(this->get_logger(), "✗ Failed!");
+                RCLCPP_ERROR(this->get_logger(), "  Message: %s", 
+                    result->message.c_str());
+            }
+        }
+        else
+        {
+            RCLCPP_ERROR(this->get_logger(), 
+                "Failed to call service");
+        }
+    }
+};
+
+int main(int argc, char** argv)
+{
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<SnapshotClientNode>();
+    
+    // 커맨드라인 인자에서 파일명 가져오기
+    std::string filename = "";
+    if (argc > 1)
+    {
+        filename = argv[1];
+    }
+    
+    node->sendRequest(filename);
+    
+    rclcpp::shutdown();
+    return 0;
+}
+```
+
+### opencv_webcam_request/package.xml
+```xml
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>opencv_webcam_request</name>
+  <version>0.0.1</version>
+  <description>Camera snapshot service client</description>
+  <maintainer email="you@example.com">Your Name</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_srvs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>camera_interfaces</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
+```
+
+### opencv_webcam_request/CMakeLists.txt
+```cmake
+cmake_minimum_required(VERSION 3.8)
+project(opencv_webcam_request)
+
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# find dependencies
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(camera_interfaces REQUIRED)
+
+# snapshot_client 실행파일
+add_executable(snapshot_client src/snapshot_client.cpp)
+ament_target_dependencies(snapshot_client 
+  rclcpp 
+  std_srvs 
+  sensor_msgs
+  camera_interfaces
+)
+
+# 설치
+install(TARGETS
+  snapshot_client
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_package()
+```
+
+## 6단계: 빌드
+```bash
+cd ~/ros2_ws
+
+# 의존성 설치
+rosdep install --from-paths src --ignore-src -r -y
+
+# 빌드
+colcon build --packages-select camera_interfaces opencv_webcam_response opencv_webcam_request
+
+# 환경 설정
+source install/setup.bash
+```
+
+## 7단계: 실행
+
+### 터미널 1: 서비스 서버 실행
+```bash
+cd ~/ros2_ws
+source install/setup.bash
+ros2 run opencv_webcam_response camera_server
+```
+
+### 터미널 2: 서비스 클라이언트 실행
+
+**기본 파일명으로 스냅샷 캡처:**
+```bash
+cd ~/ros2_ws
+source install/setup.bash
+ros2 run opencv_webcam_request snapshot_client
+```
+
+**커스텀 파일명으로 스냅샷 캡처:**
+```bash
+ros2 run opencv_webcam_request snapshot_client "my_photo.jpg"
+```
+
+### 터미널 3: CLI로 서비스 호출
+```bash
+# 기본 파일명
+ros2 service call /capture_snapshot camera_interfaces/srv/CaptureSnapshot "{filename: ''}"
+
+# 커스텀 파일명
+ros2 service call /capture_snapshot camera_interfaces/srv/CaptureSnapshot "{filename: 'test.jpg'}"
+```
+
+## 8단계: 확인
+```bash
+# 서비스 목록 확인
+ros2 service list
+
+# 서비스 타입 확인
+ros2 service type /capture_snapshot
+
+# 저장된 이미지 확인
+ls -la ./snapshots/
+```
+
+## 트러블슈팅
+
+### 카메라 권한 문제
+```bash
+sudo usermod -a -G video $USER
+# 로그아웃 후 다시 로그인
+```
+
+### OpenCV 없음
+```bash
+sudo apt install libopencv-dev
+```
+
+### cv_bridge 없음
+```bash
+sudo apt install ros-humble-cv-bridge
+```
+
+## 완성! 🎉
+
+이제 ROS2 서비스를 통해 카메라 스냅샷을 캡처할 수 있습니다.
